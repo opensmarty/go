@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"cmd/go/internal/cfg"
 	"cmd/go/internal/modfetch"
 	"cmd/go/internal/modfetch/codehost"
 	"cmd/go/internal/module"
@@ -24,11 +25,16 @@ func TestMain(m *testing.M) {
 }
 
 func testMain(m *testing.M) int {
+	modfetch.SetProxy("direct")
+
 	dir, err := ioutil.TempDir("", "modload-test-")
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
+
+	os.Setenv("GOPATH", dir)
+	cfg.BuildContext.GOPATH = dir
 	modfetch.PkgMod = filepath.Join(dir, "pkg/mod")
 	codehost.WorkRoot = filepath.Join(dir, "codework")
 	return m.Run()
@@ -132,7 +138,7 @@ func TestQuery(t *testing.T) {
 			ok, _ := path.Match(allow, m.Version)
 			return ok
 		}
-		t.Run(strings.Replace(tt.path, "/", "_", -1)+"/"+tt.query+"/"+allow, func(t *testing.T) {
+		t.Run(strings.ReplaceAll(tt.path, "/", "_")+"/"+tt.query+"/"+allow, func(t *testing.T) {
 			info, err := Query(tt.path, tt.query, allowed)
 			if tt.err != "" {
 				if err != nil && err.Error() == tt.err {

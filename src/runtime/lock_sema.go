@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin nacl netbsd openbsd plan9 solaris windows
+// +build aix darwin nacl netbsd openbsd plan9 solaris windows
 
 package runtime
 
@@ -262,7 +262,7 @@ func notetsleep_internal(n *note, ns int64, gp *g, deadline int64) bool {
 
 func notetsleep(n *note, ns int64) bool {
 	gp := getg()
-	if gp != gp.m.g0 && gp.m.preemptoff != "" {
+	if gp != gp.m.g0 {
 		throw("notetsleep not on g0")
 	}
 	semacreate(gp.m)
@@ -283,7 +283,7 @@ func notetsleepg(n *note, ns int64) bool {
 	return ok
 }
 
-func pauseSchedulerUntilCallback() bool {
+func beforeIdle() bool {
 	return false
 }
 

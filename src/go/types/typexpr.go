@@ -16,9 +16,10 @@ import (
 
 // ident type-checks identifier e and initializes x with the value or type of e.
 // If an error occurred, x.mode is set to invalid.
-// For the meaning of def, see check.typExpr, below.
+// For the meaning of def, see Checker.definedType, below.
+// If wantType is set, the identifier e is expected to denote a type.
 //
-func (check *Checker) ident(x *operand, e *ast.Ident, def *Named) {
+func (check *Checker) ident(x *operand, e *ast.Ident, def *Named, wantType bool) {
 	x.mode = invalid
 	x.expr = e
 
@@ -35,8 +36,19 @@ func (check *Checker) ident(x *operand, e *ast.Ident, def *Named) {
 	}
 	check.recordUse(e, obj)
 
-	check.objDecl(obj, def)
+	// Type-check the object.
+	// Only call Checker.objDecl if the object doesn't have a type yet
+	// (in which case we must actually determine it) or the object is a
+	// TypeName and we also want a type (in which case we might detect
+	// a cycle which needs to be reported). Otherwise we can skip the
+	// call and avoid a possible cycle error in favor of the more
+	// informative "not a type/value" error that this function's caller
+	// will issue (see issue #25790).
 	typ := obj.Type()
+	if _, gotType := obj.(*TypeName); typ == nil || gotType && wantType {
+		check.objDecl(obj, def)
+		typ = obj.Type() // type must have been assigned by Checker.objDecl
+	}
 	assert(typ != nil)
 
 	// The object may be dot-imported: If so, remove its package from
@@ -215,7 +227,7 @@ func (check *Checker) typInternal(e ast.Expr, def *Named) Type {
 
 	case *ast.Ident:
 		var x operand
-		check.ident(&x, e, def)
+		check.ident(&x, e, def, true)
 
 		switch x.mode {
 		case typexpr:
@@ -379,7 +391,7 @@ func (check *Checker) arrayLength(e ast.Expr) int64 {
 	}
 	if isUntyped(x.typ) || isInteger(x.typ) {
 		if val := constant.ToInt(x.val); val.Kind() == constant.Int {
-			if representableConst(val, check.conf, Typ[Int], nil) {
+			if representableConst(val, check, Typ[Int], nil) {
 				if n, ok := constant.Int64Val(val); ok && n >= 0 {
 					return n
 				}
@@ -402,10 +414,10 @@ func (check *Checker) collectParams(scope *Scope, list *ast.FieldList, variadicO
 		ftype := field.Type
 		if t, _ := ftype.(*ast.Ellipsis); t != nil {
 			ftype = t.Elt
-			if variadicOk && i == len(list.List)-1 {
+			if variadicOk && i == len(list.List)-1 && len(field.Names) <= 1 {
 				variadic = true
 			} else {
-				check.invalidAST(field.Pos(), "... not permitted")
+				check.softErrorf(t.Pos(), "can only use ... with final parameter in list")
 				// ignore ... and continue
 			}
 		}
@@ -439,9 +451,12 @@ func (check *Checker) collectParams(scope *Scope, list *ast.FieldList, variadicO
 	}
 
 	// For a variadic function, change the last parameter's type from T to []T.
-	if variadic && len(params) > 0 {
+	// Since we type-checked T rather than ...T, we also need to retro-actively
+	// record the type for ...T.
+	if variadic {
 		last := params[len(params)-1]
 		last.typ = &Slice{elem: last.typ}
+		check.recordTypeAndValue(list.List[len(list.List)-1].Type, typexpr, last.typ, nil)
 	}
 
 	return
@@ -526,7 +541,7 @@ func (check *Checker) interfaceType(ityp *Interface, iface *ast.InterfaceType, d
 	}
 	info := check.infoFromTypeLit(check.scope, iface, tname, path)
 	if info == nil || info == &emptyIfaceInfo {
-		// error or empty interface - exit early
+		// we got an error or the empty interface - exit early
 		ityp.allMethods = markComplete
 		return
 	}
@@ -537,6 +552,15 @@ func (check *Checker) interfaceType(ityp *Interface, iface *ast.InterfaceType, d
 		recvTyp = def
 	}
 
+	// Correct receiver type for all methods explicitly declared
+	// by this interface after we're done with type-checking at
+	// this level. See comment below for details.
+	check.later(func() {
+		for _, m := range ityp.methods {
+			m.typ.(*Signature).recv.typ = recvTyp
+		}
+	})
+
 	// collect methods
 	var sigfix []*methodInfo
 	for i, minfo := range info.methods {
@@ -546,9 +570,27 @@ func (check *Checker) interfaceType(ityp *Interface, iface *ast.InterfaceType, d
 			pos := name.Pos()
 			// Don't type-check signature yet - use an
 			// empty signature now and update it later.
-			// Since we know the receiver, set it up now
-			// (required to avoid crash in ptrRecv; see
-			// e.g. test case for issue 6638).
+			// But set up receiver since we know it and
+			// its position, and because interface method
+			// signatures don't get a receiver via regular
+			// type-checking (there isn't a receiver in the
+			// method's AST). Setting the receiver type is
+			// also important for ptrRecv() (see methodset.go).
+			//
+			// Note: For embedded methods, the receiver type
+			// should be the type of the interface that declared
+			// the methods in the first place. Since we get the
+			// methods here via methodInfo, which may be computed
+			// before we have all relevant interface types, we use
+			// the current interface's type (recvType). This may be
+			// the type of the interface embedding the interface that
+			// declared the methods. This doesn't matter for type-
+			// checking (we only care about the receiver type for
+			// the ptrRecv predicate, and it's never a pointer recv
+			// for interfaces), but it matters for go/types clients
+			// and for printing. We correct the receiver after type-
+			// checking.
+			//
 			// TODO(gri) Consider marking methods signatures
 			// as incomplete, for better error messages. See
 			// also the T4 and T5 tests in testdata/cycles2.src.

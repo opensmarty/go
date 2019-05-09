@@ -317,8 +317,7 @@ func TestClientRedirectContext(t *testing.T) {
 			return errors.New("redirected request's context never expired after root request canceled")
 		}
 	}
-	req, _ := NewRequest("GET", ts.URL, nil)
-	req = req.WithContext(ctx)
+	req, _ := NewRequestWithContext(ctx, "GET", ts.URL, nil)
 	_, err := c.Do(req)
 	ue, ok := err.(*url.Error)
 	if !ok {
@@ -977,6 +976,7 @@ func TestResponseSetsTLSConnectionState(t *testing.T) {
 	c := ts.Client()
 	tr := c.Transport.(*Transport)
 	tr.TLSClientConfig.CipherSuites = []uint16{tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA}
+	tr.TLSClientConfig.MaxVersion = tls.VersionTLS12 // to get to pick the cipher suite
 	tr.Dial = func(netw, addr string) (net.Conn, error) {
 		return net.Dial(netw, ts.Listener.Addr().String())
 	}
@@ -1183,6 +1183,11 @@ func TestStripPasswordFromError(t *testing.T) {
 			desc: "Don't Strip password from path",
 			in:   "http://user:password@dummy.faketld/password",
 			out:  "Get http://user:***@dummy.faketld/password: dummy impl",
+		},
+		{
+			desc: "Strip escaped password",
+			in:   "http://user:pa%2Fssword@dummy.faketld/",
+			out:  "Get http://user:***@dummy.faketld/: dummy impl",
 		},
 	}
 	for _, tC := range testCases {

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin dragonfly freebsd linux netbsd openbsd solaris
+// +build aix darwin dragonfly freebsd linux netbsd openbsd solaris
 
 package net
 
@@ -70,6 +70,11 @@ func initConfVal() {
 	// their own DNS requests. So always use cgo instead, which
 	// avoids that.
 	if runtime.GOOS == "darwin" {
+		// Normally we force netGo to be true if building without cgo enabled.
+		// On Darwin, we can call libc even if cgo is not enabled, so only set netGo to true
+		// if explicitly requested.
+		confVal.netGo = dnsMode == "go"
+
 		confVal.forceCgoLookupHost = true
 		return
 	}

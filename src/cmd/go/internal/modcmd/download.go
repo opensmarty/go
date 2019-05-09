@@ -5,13 +5,14 @@
 package modcmd
 
 import (
+	"encoding/json"
+	"os"
+
 	"cmd/go/internal/base"
 	"cmd/go/internal/modfetch"
 	"cmd/go/internal/modload"
 	"cmd/go/internal/module"
 	"cmd/go/internal/par"
-	"encoding/json"
-	"os"
 )
 
 var cmdDownload = &base.Command{
@@ -128,6 +129,16 @@ func runDownload(cmd *base.Command, args []string) {
 				base.Fatalf("%v", err)
 			}
 			os.Stdout.Write(append(b, '\n'))
+			if m.Error != "" {
+				base.SetExitStatus(1)
+			}
 		}
+	} else {
+		for _, m := range mods {
+			if m.Error != "" {
+				base.Errorf("%s@%s: %s\n", m.Path, m.Version, m.Error)
+			}
+		}
+		base.ExitIfErrors()
 	}
 }

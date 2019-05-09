@@ -26,6 +26,8 @@ type replacer interface {
 // NewReplacer returns a new Replacer from a list of old, new string
 // pairs. Replacements are performed in the order they appear in the
 // target string, without overlapping matches.
+//
+// NewReplacer panics if given an odd number of arguments.
 func NewReplacer(oldnew ...string) *Replacer {
 	if len(oldnew)%2 == 1 {
 		panic("strings.NewReplacer: odd argument count")
@@ -308,10 +310,6 @@ func (w *appendSliceWriter) WriteString(s string) (int, error) {
 	return len(s), nil
 }
 
-type stringWriterIface interface {
-	WriteString(string) (int, error)
-}
-
 type stringWriter struct {
 	w io.Writer
 }
@@ -320,8 +318,8 @@ func (w stringWriter) WriteString(s string) (int, error) {
 	return w.w.Write([]byte(s))
 }
 
-func getStringWriter(w io.Writer) stringWriterIface {
-	sw, ok := w.(stringWriterIface)
+func getStringWriter(w io.Writer) io.StringWriter {
+	sw, ok := w.(io.StringWriter)
 	if !ok {
 		sw = stringWriter{w}
 	}
@@ -463,7 +461,7 @@ func (r *byteReplacer) WriteString(w io.Writer, s string) (n int, err error) {
 	buf := make([]byte, bufsize)
 
 	for len(s) > 0 {
-		ncopy := copy(buf, s[:])
+		ncopy := copy(buf, s)
 		s = s[ncopy:]
 		for i, b := range buf[:ncopy] {
 			buf[i] = r[b]

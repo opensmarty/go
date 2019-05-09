@@ -195,7 +195,7 @@ TEXT runtime·madvise(SB),NOSPLIT,$0
 	MOVW	flags+8(FP), R2
 	MOVW	$SYS_madvise, R7
 	SWI	$0
-	// ignore failure - maybe pages are locked
+	MOVW	R0, ret+12(FP)
 	RET
 
 TEXT runtime·setitimer(SB),NOSPLIT,$0
@@ -605,4 +605,7 @@ TEXT runtime·sbrk0(SB),NOSPLIT,$0-4
 	MOVW	$SYS_brk, R7
 	SWI	$0
 	MOVW	R0, ret+0(FP)
+	RET
+
+TEXT runtime·sigreturn(SB),NOSPLIT,$0-0
 	RET

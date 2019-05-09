@@ -704,7 +704,7 @@ func (f *peFile) writeSymbols(ctxt *Link) {
 			}
 		}
 		class := IMAGE_SYM_CLASS_EXTERNAL
-		if s.Version != 0 || s.Attr.VisibilityHidden() || s.Attr.Local() {
+		if s.IsFileLocal() || s.Attr.VisibilityHidden() || s.Attr.Local() {
 			class = IMAGE_SYM_CLASS_STATIC
 		}
 		f.writeSymbol(ctxt.Out, s, value, sect, typ, uint8(class))
@@ -975,14 +975,8 @@ func Peinit(ctxt *Link) {
 	if *FlagTextAddr == -1 {
 		*FlagTextAddr = PEBASE + int64(PESECTHEADR)
 	}
-	if *FlagDataAddr == -1 {
-		*FlagDataAddr = 0
-	}
 	if *FlagRound == -1 {
 		*FlagRound = int(PESECTALIGN)
-	}
-	if *FlagDataAddr != 0 && *FlagRound != 0 {
-		fmt.Printf("warning: -D0x%x is ignored because of -R0x%x\n", uint64(*FlagDataAddr), uint32(*FlagRound))
 	}
 }
 
@@ -1407,7 +1401,7 @@ func addPEBaseRelocSym(ctxt *Link, s *sym.Symbol, rt *peBaseRelocTable) {
 		if !r.Sym.Attr.Reachable() {
 			continue
 		}
-		if r.Type >= 256 {
+		if r.Type >= objabi.ElfRelocOffset {
 			continue
 		}
 		if r.Siz == 0 { // informational relocation
@@ -1461,12 +1455,6 @@ func addPEBaseReloc(ctxt *Link) {
 }
 
 func (ctxt *Link) dope() {
-	/* relocation table */
-	rel := ctxt.Syms.Lookup(".rel", 0)
-
-	rel.Attr |= sym.AttrReachable
-	rel.Type = sym.SELFROSECT
-
 	initdynimport(ctxt)
 	initdynexport(ctxt)
 }
@@ -1534,9 +1522,6 @@ func Asmbpe(ctxt *Link) {
 		// some data symbols (e.g. masks) end up in the .rdata section, and they normally
 		// expect larger alignment requirement than the default text section alignment.
 		ro.characteristics |= IMAGE_SCN_ALIGN_32BYTES
-	} else {
-		// TODO(brainman): should not need IMAGE_SCN_MEM_EXECUTE, but I do not know why it carshes without it
-		ro.characteristics |= IMAGE_SCN_MEM_EXECUTE
 	}
 	ro.checkSegment(&Segrodata)
 	pefile.rdataSect = ro

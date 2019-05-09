@@ -61,7 +61,7 @@ func sysUnused(v unsafe.Pointer, n uintptr) {
 
 func sysUsed(v unsafe.Pointer, n uintptr) {
 	r := stdcall4(_VirtualAlloc, uintptr(v), n, _MEM_COMMIT, _PAGE_READWRITE)
-	if r == uintptr(v) {
+	if r != 0 {
 		return
 	}
 
@@ -79,6 +79,9 @@ func sysUsed(v unsafe.Pointer, n uintptr) {
 		v = add(v, small)
 		n -= small
 	}
+}
+
+func sysHugePage(v unsafe.Pointer, n uintptr) {
 }
 
 // Don't split the stack as this function may be invoked without a valid G,
