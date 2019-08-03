@@ -5,6 +5,7 @@
 package main
 
 import (
+	"crypto/md5"
 	"flag"
 	"fmt"
 	"go/build"
@@ -87,6 +88,7 @@ var target = flag.String("target", "", "test disassembly of `goos/goarch` binary
 // can handle that one.
 
 func testDisasm(t *testing.T, printCode bool, flags ...string) {
+	t.Parallel()
 	goarch := runtime.GOARCH
 	if *target != "" {
 		f := strings.Split(*target, "/")
@@ -100,7 +102,8 @@ func testDisasm(t *testing.T, printCode bool, flags ...string) {
 		goarch = f[1]
 	}
 
-	hello := filepath.Join(tmp, "hello.exe")
+	hash := md5.Sum([]byte(fmt.Sprintf("%v-%v", flags, printCode)))
+	hello := filepath.Join(tmp, fmt.Sprintf("hello-%x.exe", hash))
 	args := []string{"build", "-o", hello}
 	args = append(args, flags...)
 	args = append(args, "testdata/fmthello.go")

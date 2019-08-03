@@ -101,16 +101,14 @@ TEXT runtime·lwp_self(SB),NOSPLIT,$0
 
 // Exit the entire program (like C exit)
 TEXT runtime·exit(SB),NOSPLIT,$-8
-	MOVD	code+0(FP), R0		// arg 1 - exit status
+	MOVW	code+0(FP), R0		// arg 1 - exit status
 	SVC	$SYS_exit
 	MOVD	$0, R0			// If we're still running,
 	MOVD	R0, (R0)		// crash
 
-// XXX the use of R1 here does not make sense.
-// Does it not matter?
 // func exitThread(wait *uint32)
 TEXT runtime·exitThread(SB),NOSPLIT,$0-8
-	MOVW	wait+0(FP), R0
+	MOVD	wait+0(FP), R0
 	// We're done using the stack.
 	MOVW	$0, R1
 	STLRW	R1, (R0)
@@ -156,11 +154,11 @@ TEXT runtime·write(SB),NOSPLIT,$-8
 	BCC	ok
 	MOVW	$-1, R0
 ok:
-	MOVW	R1, ret+24(FP)
+	MOVW	R0, ret+24(FP)
 	RET
 
 TEXT runtime·usleep(SB),NOSPLIT,$24-4
-	MOVW	usec+0(FP), R3
+	MOVWU	usec+0(FP), R3
 	MOVD	R3, R5
 	MOVW	$1000000, R4
 	UDIV	R4, R3
@@ -171,7 +169,7 @@ TEXT runtime·usleep(SB),NOSPLIT,$24-4
 	MUL	R4, R5
 	MOVD	R5, 16(RSP)		// nsec
 
-	MOVD	RSP, R0			// arg 1 - rqtp
+	MOVD	$8(RSP), R0		// arg 1 - rqtp
 	MOVD	$0, R1			// arg 2 - rmtp
 	SVC	$SYS___nanosleep50
 	RET
@@ -200,11 +198,11 @@ TEXT runtime·setitimer(SB),NOSPLIT,$-8
 // func walltime() (sec int64, nsec int32)
 TEXT runtime·walltime(SB), NOSPLIT, $32
 	MOVW	$CLOCK_REALTIME, R0	// arg 1 - clock_id
-	MOVW	8(RSP), R1		// arg 2 - tp
+	MOVD	$8(RSP), R1		// arg 2 - tp
 	SVC	$SYS___clock_gettime50
 
 	MOVD	8(RSP), R0		// sec
-	MOVW	16(RSP), R1		// nsec
+	MOVD	16(RSP), R1		// nsec
 
 	// sec is in R0, nsec in R1
 	MOVD	R0, sec+0(FP)
@@ -218,7 +216,7 @@ TEXT runtime·nanotime(SB), NOSPLIT, $32
 	MOVD	$8(RSP), R1		// arg 2 - tp
 	SVC	$SYS___clock_gettime50
 	MOVD	8(RSP), R0		// sec
-	MOVW	16(RSP), R2		// nsec
+	MOVD	16(RSP), R2		// nsec
 
 	// sec is in R0, nsec in R2
 	// return nsec in R2
@@ -249,7 +247,7 @@ fail:
 	MOVD	$0, R0
 	MOVD	R0, (R0)		// crash
 
-TEXT runtime·sigreturn_tramp(SB),NOSPLIT,$-8
+TEXT sigreturn_tramp<>(SB),NOSPLIT,$-8
 	MOVD	g, R0
 	SVC	$SYS_setcontext
 	MOVD	$0x4242, R0		// Something failed, return magic number
@@ -260,7 +258,7 @@ TEXT runtime·sigaction(SB),NOSPLIT,$-8
 	MOVD	new+8(FP), R1		// arg 2 - nsa
 	MOVD	old+16(FP), R2		// arg 3 - osa
 					// arg 4 - tramp
-	MOVD	$runtime·sigreturn_tramp(SB), R3
+	MOVD	$sigreturn_tramp<>(SB), R3
 	MOVW	$2, R4			// arg 5 - vers
 	SVC	$SYS___sigaction_sigtramp
 	BCS	fail
@@ -278,7 +276,29 @@ TEXT runtime·sigfwd(SB),NOSPLIT,$0-32
 	BL	(R11)
 	RET
 
-TEXT runtime·sigtramp(SB),NOSPLIT,$24
+TEXT runtime·sigtramp(SB),NOSPLIT,$192
+	// Save callee-save registers in the case of signal forwarding.
+	// Please refer to https://golang.org/issue/31827 .
+	MOVD	R19, 8*4(RSP)
+	MOVD	R20, 8*5(RSP)
+	MOVD	R21, 8*6(RSP)
+	MOVD	R22, 8*7(RSP)
+	MOVD	R23, 8*8(RSP)
+	MOVD	R24, 8*9(RSP)
+	MOVD	R25, 8*10(RSP)
+	MOVD	R26, 8*11(RSP)
+	MOVD	R27, 8*12(RSP)
+	MOVD	g, 8*13(RSP)
+	MOVD	R29, 8*14(RSP)
+	FMOVD	F8, 8*15(RSP)
+	FMOVD	F9, 8*16(RSP)
+	FMOVD	F10, 8*17(RSP)
+	FMOVD	F11, 8*18(RSP)
+	FMOVD	F12, 8*19(RSP)
+	FMOVD	F13, 8*20(RSP)
+	FMOVD	F14, 8*21(RSP)
+	FMOVD	F15, 8*22(RSP)
+
 	// this might be called in external code context,
 	// where g is not set.
 	// first save R0, because runtime·load_g will clobber it
@@ -292,6 +312,28 @@ TEXT runtime·sigtramp(SB),NOSPLIT,$24
 	MOVD	R1, 16(RSP)
 	MOVD	R2, 24(RSP)
 	BL	runtime·sigtrampgo(SB)
+
+	// Restore callee-save registers.
+	MOVD	8*4(RSP), R19
+	MOVD	8*5(RSP), R20
+	MOVD	8*6(RSP), R21
+	MOVD	8*7(RSP), R22
+	MOVD	8*8(RSP), R23
+	MOVD	8*9(RSP), R24
+	MOVD	8*10(RSP), R25
+	MOVD	8*11(RSP), R26
+	MOVD	8*12(RSP), R27
+	MOVD	8*13(RSP), g
+	MOVD	8*14(RSP), R29
+	FMOVD	8*15(RSP), F8
+	FMOVD	8*16(RSP), F9
+	FMOVD	8*17(RSP), F10
+	FMOVD	8*18(RSP), F11
+	FMOVD	8*19(RSP), F12
+	FMOVD	8*20(RSP), F13
+	FMOVD	8*21(RSP), F14
+	FMOVD	8*22(RSP), F15
+
 	RET
 
 TEXT runtime·mmap(SB),NOSPLIT,$0
@@ -333,7 +375,7 @@ ok:
 	MOVD	R0, ret+24(FP)
 	RET
 
-TEXT runtime·sigaltstack(SB),NOSPLIT,$-8
+TEXT runtime·sigaltstack(SB),NOSPLIT,$0
 	MOVD	new+0(FP), R0		// arg 1 - nss
 	MOVD	old+8(FP), R1		// arg 2 - oss
 	SVC	$SYS___sigaltstack14

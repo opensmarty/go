@@ -211,7 +211,7 @@ TEXT runtime·mcall(SB), NOSPLIT|NOFRAME, $0-8
 TEXT runtime·systemstack_switch(SB), NOSPLIT, $0-0
 	// We have several undefs here so that 16 bytes past
 	// $runtime·systemstack_switch lies within them whether or not the
-        // instructions that derive r2 from r12 are there.
+	// instructions that derive r2 from r12 are there.
 	UNDEF
 	UNDEF
 	UNDEF
@@ -886,17 +886,14 @@ TEXT runtime·goexit(SB),NOSPLIT|NOFRAME|TOPFRAME,$0-0
 	// traceback from goexit1 must hit code range of goexit
 	MOVD	R0, R0	// NOP
 
-TEXT runtime·sigreturn(SB),NOSPLIT,$0-0
-	RET
-
 // prepGoExitFrame saves the current TOC pointer (i.e. the TOC pointer for the
 // module containing runtime) to the frame that goexit will execute in when
 // the goroutine exits. It's implemented in assembly mainly because that's the
 // easiest way to get access to R2.
 TEXT runtime·prepGoExitFrame(SB),NOSPLIT,$0-8
-      MOVD    sp+0(FP), R3
-      MOVD    R2, 24(R3)
-      RET
+	MOVD    sp+0(FP), R3
+	MOVD    R2, 24(R3)
+	RET
 
 TEXT runtime·addmoduledata(SB),NOSPLIT|NOFRAME,$0-0
 	ADD	$-8, R1

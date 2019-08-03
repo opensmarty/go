@@ -66,6 +66,7 @@ func MkEnv() []cfg.EnvVar {
 
 	envFile, _ := cfg.EnvFile()
 	env := []cfg.EnvVar{
+		{Name: "GO111MODULE", Value: cfg.Getenv("GO111MODULE")},
 		{Name: "GOARCH", Value: cfg.Goarch},
 		{Name: "GOBIN", Value: cfg.GOBIN},
 		{Name: "GOCACHE", Value: cache.DefaultDir()},
@@ -78,6 +79,7 @@ func MkEnv() []cfg.EnvVar {
 		{Name: "GONOSUMDB", Value: cfg.GONOSUMDB},
 		{Name: "GOOS", Value: cfg.Goos},
 		{Name: "GOPATH", Value: cfg.BuildContext.GOPATH},
+		{Name: "GOPRIVATE", Value: cfg.GOPRIVATE},
 		{Name: "GOPROXY", Value: cfg.GOPROXY},
 		{Name: "GOROOT", Value: cfg.GOROOT},
 		{Name: "GOSUMDB", Value: cfg.GOSUMDB},

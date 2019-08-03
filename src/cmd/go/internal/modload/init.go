@@ -34,7 +34,7 @@ import (
 
 var (
 	cwd            string // TODO(bcmills): Is this redundant with base.Cwd?
-	mustUseModules = true
+	mustUseModules = false
 	initialized    bool
 
 	modRoot     string
@@ -79,8 +79,6 @@ func BinDir() string {
 	return filepath.Join(gopath, "bin")
 }
 
-var inGOPATH bool // running in GOPATH/src
-
 // Init determines whether module mode is enabled, locates the root of the
 // current module (if any), sets environment variables for Git subprocesses, and
 // configures the cfg, codehost, load, modfetch, and search packages for use
@@ -95,9 +93,9 @@ func Init() {
 	switch env {
 	default:
 		base.Fatalf("go: unknown environment setting GO111MODULE=%s", env)
-	case "auto":
+	case "auto", "":
 		mustUseModules = false
-	case "on", "":
+	case "on":
 		mustUseModules = true
 	case "off":
 		mustUseModules = false
@@ -135,28 +133,6 @@ func Init() {
 	cwd, err = os.Getwd()
 	if err != nil {
 		base.Fatalf("go: %v", err)
-	}
-
-	inGOPATH = false
-	for _, gopath := range filepath.SplitList(cfg.BuildContext.GOPATH) {
-		if gopath == "" {
-			continue
-		}
-		if search.InDir(cwd, filepath.Join(gopath, "src")) != "" {
-			inGOPATH = true
-			break
-		}
-	}
-
-	if inGOPATH && !mustUseModules {
-		if CmdModInit {
-			die() // Don't init a module that we're just going to ignore.
-		}
-		// No automatic enabling in GOPATH.
-		if root := findModuleRoot(cwd); root != "" {
-			cfg.GoModInGOPATH = filepath.Join(root, "go.mod")
-		}
-		return
 	}
 
 	if CmdModInit {
@@ -300,9 +276,6 @@ func die() {
 	if cfg.Getenv("GO111MODULE") == "off" {
 		base.Fatalf("go: modules disabled by GO111MODULE=off; see 'go help modules'")
 	}
-	if inGOPATH && !mustUseModules {
-		base.Fatalf("go: modules disabled inside GOPATH/src by GO111MODULE=auto; see 'go help modules'")
-	}
 	if cwd != "" {
 		if dir, name := findAltConfig(cwd); dir != "" {
 			rel, err := filepath.Rel(cwd, dir)
@@ -343,7 +316,7 @@ func InitMod() {
 	}
 
 	gomod := filepath.Join(modRoot, "go.mod")
-	data, err := ioutil.ReadFile(gomod)
+	data, err := renameio.ReadFile(gomod)
 	if err != nil {
 		base.Fatalf("go: %v", err)
 	}
@@ -384,7 +357,7 @@ func InitMod() {
 func modFileToBuildList() {
 	Target = modFile.Module.Mod
 	targetPrefix = Target.Path
-	if rel := search.InDir(cwd, cfg.GOROOTsrc); rel != "" && rel != filepath.FromSlash("cmd/vet/all") {
+	if rel := search.InDir(cwd, cfg.GOROOTsrc); rel != "" {
 		targetInGorootSrc = true
 		if Target.Path == "std" {
 			targetPrefix = ""
@@ -448,7 +421,7 @@ func legacyModInit() {
 		fmt.Fprintf(os.Stderr, "go: creating new go.mod: module %s\n", path)
 		modFile = new(modfile.File)
 		modFile.AddModuleStmt(path)
-		AddGoStmt()
+		addGoStmt() // Add the go directive before converted module requirements.
 	}
 
 	for _, name := range altConfigs {
@@ -459,7 +432,6 @@ func legacyModInit() {
 			if convert == nil {
 				return
 			}
-			AddGoStmt()
 			fmt.Fprintf(os.Stderr, "go: copying requirements from %s\n", base.ShortPath(cfg))
 			cfg = filepath.ToSlash(cfg)
 			if err := modconv.ConvertLegacyConfig(modFile, cfg, data); err != nil {
@@ -474,9 +446,9 @@ func legacyModInit() {
 	}
 }
 
-// AddGoStmt adds a go directive to the go.mod file if it does not already include one.
+// addGoStmt adds a go directive to the go.mod file if it does not already include one.
 // The 'go' version added, if any, is the latest version supported by this toolchain.
-func AddGoStmt() {
+func addGoStmt() {
 	if modFile.Go != nil && modFile.Go.Version != "" {
 		return
 	}
@@ -546,6 +518,9 @@ func findAltConfig(dir string) (root, name string) {
 func findModulePath(dir string) (string, error) {
 	if CmdModModule != "" {
 		// Running go mod init x/y/z; return x/y/z.
+		if err := module.CheckImportPath(CmdModModule); err != nil {
+			return "", err
+		}
 		return CmdModModule, nil
 	}
 
@@ -680,6 +655,8 @@ func WriteGoMod() {
 		return
 	}
 
+	addGoStmt()
+
 	if loaded != nil {
 		reqs := MinReqs()
 		min, err := reqs.Required(Target)
@@ -722,7 +699,7 @@ func WriteGoMod() {
 	defer unlock()
 
 	file := filepath.Join(modRoot, "go.mod")
-	old, err := ioutil.ReadFile(file)
+	old, err := renameio.ReadFile(file)
 	if !bytes.Equal(old, modFileData) {
 		if bytes.Equal(old, new) {
 			// Some other process wrote the same go.mod file that we were about to write.
@@ -742,7 +719,7 @@ func WriteGoMod() {
 
 	}
 
-	if err := renameio.WriteFile(file, new); err != nil {
+	if err := renameio.WriteFile(file, new, 0666); err != nil {
 		base.Fatalf("error writing go.mod: %v", err)
 	}
 	modFileData = new
@@ -759,13 +736,21 @@ func fixVersion(path, vers string) (string, error) {
 	// Avoid the query if it looks OK.
 	_, pathMajor, ok := module.SplitPathVersion(path)
 	if !ok {
-		return "", fmt.Errorf("malformed module path: %s", path)
+		return "", &module.ModuleError{
+			Path: path,
+			Err: &module.InvalidVersionError{
+				Version: vers,
+				Err:     fmt.Errorf("malformed module path %q", path),
+			},
+		}
 	}
-	if vers != "" && module.CanonicalVersion(vers) == vers && module.MatchPathMajor(vers, pathMajor) {
-		return vers, nil
+	if vers != "" && module.CanonicalVersion(vers) == vers {
+		if err := module.MatchPathMajor(vers, pathMajor); err == nil {
+			return vers, nil
+		}
 	}
 
-	info, err := Query(path, vers, nil)
+	info, err := Query(path, vers, "", nil)
 	if err != nil {
 		return "", err
 	}

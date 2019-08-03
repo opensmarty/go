@@ -8,35 +8,13 @@ import (
 	"internal/reflectlite"
 )
 
-// A Wrapper provides context around another error.
-type Wrapper interface {
-	// Unwrap returns the next error in the error chain.
-	// If there is no next error, Unwrap returns nil.
-	Unwrap() error
-}
-
-// Opaque returns an error with the same error formatting as err
-// but that does not match err and cannot be unwrapped.
-func Opaque(err error) error {
-	return noWrapper{err}
-}
-
-type noWrapper struct {
-	error
-}
-
-func (e noWrapper) FormatError(p Printer) (next error) {
-	if f, ok := e.error.(Formatter); ok {
-		return f.FormatError(p)
-	}
-	p.Print(e.error)
-	return nil
-}
-
-// Unwrap returns the result of calling the Unwrap method on err, if err
-// implements Wrapper. Otherwise, Unwrap returns nil.
+// Unwrap returns the result of calling the Unwrap method on err, if err's
+// type contains an Unwrap method returning error.
+// Otherwise, Unwrap returns nil.
 func Unwrap(err error) error {
-	u, ok := err.(Wrapper)
+	u, ok := err.(interface {
+		Unwrap() error
+	})
 	if !ok {
 		return nil
 	}
@@ -52,7 +30,7 @@ func Is(err, target error) bool {
 		return err == target
 	}
 
-	isComparable := target == nil || reflectlite.TypeOf(target).Comparable()
+	isComparable := reflectlite.TypeOf(target).Comparable()
 	for {
 		if isComparable && err == target {
 			return true
@@ -69,15 +47,16 @@ func Is(err, target error) bool {
 	}
 }
 
-// As finds the first error in err's chain that matches the type to which target
-// points, and if so, sets the target to its value and returns true. An error
-// matches a type if it is assignable to the target type, or if it has a method
-// As(interface{}) bool such that As(target) returns true. As will panic if
-// target is not a non-nil pointer to a type which implements error or is of
-// interface type. As returns false if error is nil.
+// As finds the first error in err's chain that matches target, and if so, sets
+// target to that error value and returns true.
 //
-// The As method should set the target to its value and return true if err
-// matches the type to which target points.
+// An error matches target if the error's concrete value is assignable to the value
+// pointed to by target, or if the error has a method As(interface{}) bool such that
+// As(target) returns true. In the latter case, the As method is responsible for
+// setting target.
+//
+// As will panic if target is not a non-nil pointer to either a type that implements
+// error, or to any interface type. As returns false if err is nil.
 func As(err error, target interface{}) bool {
 	if target == nil {
 		panic("errors: target cannot be nil")

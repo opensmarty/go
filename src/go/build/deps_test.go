@@ -34,7 +34,7 @@ import (
 //
 var pkgDeps = map[string][]string{
 	// L0 is the lowest level, core, nearly unavoidable packages.
-	"errors":                  {"runtime", "internal/errinternal", "internal/reflectlite"},
+	"errors":                  {"runtime", "internal/reflectlite"},
 	"io":                      {"errors", "sync", "sync/atomic"},
 	"runtime":                 {"unsafe", "runtime/internal/atomic", "runtime/internal/sys", "runtime/internal/math", "internal/cpu", "internal/bytealg"},
 	"runtime/internal/sys":    {},
@@ -46,7 +46,6 @@ var pkgDeps = map[string][]string{
 	"unsafe":                  {},
 	"internal/cpu":            {},
 	"internal/bytealg":        {"unsafe", "internal/cpu"},
-	"internal/errinternal":    {},
 	"internal/reflectlite":    {"runtime", "unsafe"},
 
 	"L0": {
@@ -167,6 +166,7 @@ var pkgDeps = map[string][]string{
 		"syscall/js",
 	},
 
+	"internal/cfg":     {"L0"},
 	"internal/poll":    {"L0", "internal/oserror", "internal/race", "syscall", "time", "unicode/utf16", "unicode/utf8", "internal/syscall/windows"},
 	"internal/testlog": {"L0"},
 	"os":               {"L1", "os", "syscall", "time", "internal/oserror", "internal/poll", "internal/syscall/windows", "internal/syscall/unix", "internal/testlog"},
@@ -186,7 +186,7 @@ var pkgDeps = map[string][]string{
 	},
 
 	// Formatted I/O: few dependencies (L1) but we must add reflect and internal/fmtsort.
-	"fmt": {"L1", "bytes", "strings", "os", "reflect", "internal/errinternal", "internal/fmtsort"},
+	"fmt": {"L1", "os", "reflect", "internal/fmtsort"},
 	"log": {"L1", "os", "fmt", "time"},
 
 	// Packages used by testing must be low-level (L2+fmt).
@@ -200,7 +200,7 @@ var pkgDeps = map[string][]string{
 	"testing":               {"L2", "flag", "fmt", "internal/race", "os", "runtime/debug", "runtime/pprof", "runtime/trace", "time"},
 	"testing/iotest":        {"L2", "log"},
 	"testing/quick":         {"L2", "flag", "fmt", "reflect", "time"},
-	"internal/testenv":      {"L2", "OS", "flag", "testing", "syscall"},
+	"internal/testenv":      {"L2", "OS", "flag", "testing", "syscall", "internal/cfg"},
 	"internal/lazyregexp":   {"L2", "OS", "regexp"},
 	"internal/lazytemplate": {"L2", "OS", "text/template"},
 
@@ -250,7 +250,7 @@ var pkgDeps = map[string][]string{
 	"compress/gzip":                  {"L4", "compress/flate"},
 	"compress/lzw":                   {"L4"},
 	"compress/zlib":                  {"L4", "compress/flate"},
-	"context":                        {"errors", "internal/oserror", "internal/reflectlite", "sync", "time"},
+	"context":                        {"errors", "internal/reflectlite", "sync", "time"},
 	"database/sql":                   {"L4", "container/list", "context", "database/sql/driver", "database/sql/internal"},
 	"database/sql/driver":            {"L4", "context", "time", "database/sql/internal"},
 	"debug/dwarf":                    {"L4"},
@@ -400,10 +400,10 @@ var pkgDeps = map[string][]string{
 	// SSL/TLS.
 	"crypto/tls": {
 		"L4", "CRYPTO-MATH", "OS", "golang.org/x/crypto/cryptobyte", "golang.org/x/crypto/hkdf",
-		"container/list", "crypto/x509", "encoding/pem", "net", "syscall",
+		"container/list", "crypto/x509", "encoding/pem", "net", "syscall", "crypto/ed25519",
 	},
 	"crypto/x509": {
-		"L4", "CRYPTO-MATH", "OS", "CGO",
+		"L4", "CRYPTO-MATH", "OS", "CGO", "crypto/ed25519",
 		"crypto/x509/pkix", "encoding/pem", "encoding/hex", "net", "os/user", "syscall", "net/url",
 		"golang.org/x/crypto/cryptobyte", "golang.org/x/crypto/cryptobyte/asn1",
 	},

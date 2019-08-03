@@ -29,6 +29,7 @@ import (
 
 	"cmd/go/internal/cache"
 	"cmd/go/internal/cfg"
+	"cmd/go/internal/robustio"
 	"cmd/internal/sys"
 )
 
@@ -685,7 +686,7 @@ func (tg *testgoData) creatingTemp(path string) {
 	if tg.wd != "" && !filepath.IsAbs(path) {
 		path = filepath.Join(tg.pwd(), path)
 	}
-	tg.must(os.RemoveAll(path))
+	tg.must(robustio.RemoveAll(path))
 	tg.temps = append(tg.temps, path)
 }
 
@@ -887,7 +888,7 @@ func removeAll(dir string) error {
 		}
 		return nil
 	})
-	return os.RemoveAll(dir)
+	return robustio.RemoveAll(dir)
 }
 
 // failSSH puts an ssh executable in the PATH that always fails.
@@ -1181,7 +1182,7 @@ func testMove(t *testing.T, vcs, url, base, config string) {
 	case "svn":
 		// SVN doesn't believe in text files so we can't just edit the config.
 		// Check out a different repo into the wrong place.
-		tg.must(os.RemoveAll(tg.path("src/code.google.com/p/rsc-svn")))
+		tg.must(robustio.RemoveAll(tg.path("src/code.google.com/p/rsc-svn")))
 		tg.run("get", "-d", "-u", "code.google.com/p/rsc-svn2/trunk")
 		tg.must(os.Rename(tg.path("src/code.google.com/p/rsc-svn2"), tg.path("src/code.google.com/p/rsc-svn")))
 	default:
@@ -1222,10 +1223,12 @@ func TestInternalCache(t *testing.T) {
 }
 
 func TestMoveGit(t *testing.T) {
+	testenv.MustHaveExecPath(t, "git")
 	testMove(t, "git", "rsc.io/pdf", "pdf", "rsc.io/pdf/.git/config")
 }
 
 func TestMoveHG(t *testing.T) {
+	testenv.MustHaveExecPath(t, "hg")
 	testMove(t, "hg", "vcs-test.golang.org/go/custom-hg-hello", "custom-hg-hello", "vcs-test.golang.org/go/custom-hg-hello/.hg/hgrc")
 }
 
@@ -1287,9 +1290,7 @@ func TestImportCycle(t *testing.T) {
 // cmd/go: custom import path checking should not apply to Go packages without import comment.
 func TestIssue10952(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("skipping because git binary not found")
-	}
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -1305,9 +1306,7 @@ func TestIssue10952(t *testing.T) {
 
 func TestIssue16471(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("skipping because git binary not found")
-	}
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -1323,9 +1322,7 @@ func TestIssue16471(t *testing.T) {
 // Test git clone URL that uses SCP-like syntax and custom import path checking.
 func TestIssue11457(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("skipping because git binary not found")
-	}
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -1350,9 +1347,7 @@ func TestIssue11457(t *testing.T) {
 
 func TestGetGitDefaultBranch(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("skipping because git binary not found")
-	}
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -1378,9 +1373,7 @@ func TestGetGitDefaultBranch(t *testing.T) {
 // Security issue. Don't disable. See golang.org/issue/22125.
 func TestAccidentalGitCheckout(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("skipping because git binary not found")
-	}
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -1653,6 +1646,7 @@ func TestInstallToGOBINCommandLinePackage(t *testing.T) {
 
 func TestGoGetNonPkg(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -1669,6 +1663,7 @@ func TestGoGetNonPkg(t *testing.T) {
 
 func TestGoGetTestOnlyPkg(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -1699,7 +1694,7 @@ func TestInstalls(t *testing.T) {
 	goarch := strings.TrimSpace(tg.getStdout())
 	tg.setenv("GOARCH", goarch)
 	fixbin := filepath.Join(goroot, "pkg", "tool", goos+"_"+goarch, "fix") + exeSuffix
-	tg.must(os.RemoveAll(fixbin))
+	tg.must(robustio.RemoveAll(fixbin))
 	tg.run("install", "cmd/fix")
 	tg.wantExecutable(fixbin, "did not install cmd/fix to $GOROOT/pkg/tool")
 	tg.must(os.Remove(fixbin))
@@ -1898,6 +1893,7 @@ func TestGoListTest(t *testing.T) {
 }
 
 func TestGoListCompiledCgo(t *testing.T) {
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -2057,6 +2053,7 @@ func TestDefaultGOPATH(t *testing.T) {
 
 func TestDefaultGOPATHGet(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -2069,13 +2066,13 @@ func TestDefaultGOPATHGet(t *testing.T) {
 	tg.grepStderr("created GOPATH="+regexp.QuoteMeta(tg.path("home/go"))+"; see 'go help gopath'", "did not create GOPATH")
 
 	// no warning if directory already exists
-	tg.must(os.RemoveAll(tg.path("home/go")))
+	tg.must(robustio.RemoveAll(tg.path("home/go")))
 	tg.tempDir("home/go")
 	tg.run("get", "github.com/golang/example/hello")
 	tg.grepStderrNot(".", "expected no output on standard error")
 
 	// error if $HOME/go is a file
-	tg.must(os.RemoveAll(tg.path("home/go")))
+	tg.must(robustio.RemoveAll(tg.path("home/go")))
 	tg.tempFile("home/go", "")
 	tg.runFail("get", "github.com/golang/example/hello")
 	tg.grepStderr(`mkdir .*[/\\]go: .*(not a directory|cannot find the path)`, "expected error because $HOME/go is a file")
@@ -2438,6 +2435,7 @@ func TestSymlinkWarning(t *testing.T) {
 // Issue 8181.
 func TestGoGetDashTIssue8181(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -2452,6 +2450,7 @@ func TestGoGetDashTIssue8181(t *testing.T) {
 func TestIssue11307(t *testing.T) {
 	// go get -u was not working except in checkout directory
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -2537,6 +2536,7 @@ func TestCoverageRuns(t *testing.T) {
 
 func TestCoverageDotImport(t *testing.T) {
 	skipIfGccgo(t, "gccgo has no cover tool")
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -2716,6 +2716,7 @@ func TestCoverageFunc(t *testing.T) {
 // Issue 24588.
 func TestCoverageDashC(t *testing.T) {
 	skipIfGccgo(t, "gccgo has no cover tool")
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -2872,7 +2873,7 @@ func TestCgoDependsOnSyscall(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join(runtime.GOROOT(), "pkg", "*_race"))
 	tg.must(err)
 	for _, file := range files {
-		tg.check(os.RemoveAll(file))
+		tg.check(robustio.RemoveAll(file))
 	}
 	tg.tempFile("src/foo/foo.go", `
 		package foo
@@ -2928,6 +2929,7 @@ func TestCgoPkgConfig(t *testing.T) {
 
 	tg.run("env", "PKG_CONFIG")
 	pkgConfig := strings.TrimSpace(tg.getStdout())
+	testenv.MustHaveExecPath(t, pkgConfig)
 	if out, err := exec.Command(pkgConfig, "--atleast-pkgconfig-version", "0.24").CombinedOutput(); err != nil {
 		t.Skipf("%s --atleast-pkgconfig-version 0.24: %v\n%s", pkgConfig, err, out)
 	}
@@ -3030,9 +3032,7 @@ func TestIssue7573(t *testing.T) {
 	if !canCgo {
 		t.Skip("skipping because cgo not enabled")
 	}
-	if _, err := exec.LookPath("gccgo"); err != nil {
-		t.Skip("skipping because no gccgo compiler found")
-	}
+	testenv.MustHaveExecPath(t, "gccgo")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -3327,6 +3327,7 @@ func TestGoGenerateBadImports(t *testing.T) {
 
 func TestGoGetCustomDomainWildcard(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -3338,6 +3339,7 @@ func TestGoGetCustomDomainWildcard(t *testing.T) {
 
 func TestGoGetInternalWildcard(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -3397,6 +3399,7 @@ func TestVetWithOnlyCgoFiles(t *testing.T) {
 	if !canCgo {
 		t.Skip("skipping because cgo not enabled")
 	}
+	tooSlow(t)
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -3409,6 +3412,7 @@ func TestVetWithOnlyCgoFiles(t *testing.T) {
 // Issue 9767, 19769.
 func TestGoGetDotSlashDownload(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -3632,7 +3636,7 @@ func TestImportLocal(t *testing.T) {
 		var _ = x.X
 	`)
 	tg.runFail("build", "dir/x")
-	tg.grepStderr("local import.*in non-local package", "did not diagnose local import")
+	tg.grepStderr("cannot import current directory", "did not diagnose import current directory")
 
 	// ... even in a test.
 	tg.tempFile("src/dir/x/xx.go", `package x
@@ -3645,7 +3649,7 @@ func TestImportLocal(t *testing.T) {
 	`)
 	tg.run("build", "dir/x")
 	tg.runFail("test", "dir/x")
-	tg.grepStderr("local import.*in non-local package", "did not diagnose local import")
+	tg.grepStderr("cannot import current directory", "did not diagnose import current directory")
 
 	// ... even in an xtest.
 	tg.tempFile("src/dir/x/xx.go", `package x
@@ -3658,12 +3662,13 @@ func TestImportLocal(t *testing.T) {
 	`)
 	tg.run("build", "dir/x")
 	tg.runFail("test", "dir/x")
-	tg.grepStderr("local import.*in non-local package", "did not diagnose local import")
+	tg.grepStderr("cannot import current directory", "did not diagnose import current directory")
 }
 
 func TestGoGetInsecure(t *testing.T) {
 	test := func(t *testing.T, modules bool) {
 		testenv.MustHaveExternalNetwork(t)
+		testenv.MustHaveExecPath(t, "git")
 
 		tg := testgo(t)
 		defer tg.cleanup()
@@ -3704,6 +3709,7 @@ func TestGoGetInsecure(t *testing.T) {
 
 func TestGoGetUpdateInsecure(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -3728,6 +3734,7 @@ func TestGoGetUpdateInsecure(t *testing.T) {
 
 func TestGoGetUpdateUnknownProtocol(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -3762,6 +3769,7 @@ func TestGoGetUpdateUnknownProtocol(t *testing.T) {
 
 func TestGoGetInsecureCustomDomain(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -3864,6 +3872,7 @@ func TestGoGetUpdate(t *testing.T) {
 	// former dependencies, not current ones.
 
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -3891,6 +3900,7 @@ func TestGoGetUpdate(t *testing.T) {
 // Issue #20512.
 func TestGoGetRace(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 	if !canRace {
 		t.Skip("skipping because race detector not supported")
 	}
@@ -3907,6 +3917,7 @@ func TestGoGetDomainRoot(t *testing.T) {
 	// go get foo.io (not foo.io/subdir) was not working consistently.
 
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -3921,10 +3932,10 @@ func TestGoGetDomainRoot(t *testing.T) {
 	tg.run("get", "go-get-issue-9357.appspot.com")
 	tg.run("get", "-u", "go-get-issue-9357.appspot.com")
 
-	tg.must(os.RemoveAll(tg.path("src/go-get-issue-9357.appspot.com")))
+	tg.must(robustio.RemoveAll(tg.path("src/go-get-issue-9357.appspot.com")))
 	tg.run("get", "go-get-issue-9357.appspot.com")
 
-	tg.must(os.RemoveAll(tg.path("src/go-get-issue-9357.appspot.com")))
+	tg.must(robustio.RemoveAll(tg.path("src/go-get-issue-9357.appspot.com")))
 	tg.run("get", "-u", "go-get-issue-9357.appspot.com")
 }
 
@@ -4297,6 +4308,7 @@ func TestGenerateUsesBuildContext(t *testing.T) {
 // Issue 14450: go get -u .../ tried to import not downloaded package
 func TestGoGetUpdateWithWildcard(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
+	testenv.MustHaveExecPath(t, "git")
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -4508,8 +4520,9 @@ func TestLinkXImportPathEscape(t *testing.T) {
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
+	tg.makeTempdir()
 	tg.setenv("GOPATH", filepath.Join(tg.pwd(), "testdata"))
-	exe := "./linkx" + exeSuffix
+	exe := tg.path("linkx" + exeSuffix)
 	tg.creatingTemp(exe)
 	tg.run("build", "-o", exe, "-ldflags", "-X=my.pkg.Text=linkXworked", "my.pkg/main")
 	out, err := exec.Command(exe).CombinedOutput()
@@ -4745,7 +4758,7 @@ func TestExecutableGOROOT(t *testing.T) {
 		check(t, symGoTool, newRoot)
 	})
 
-	tg.must(os.RemoveAll(tg.path("new/pkg")))
+	tg.must(robustio.RemoveAll(tg.path("new/pkg")))
 
 	// Binaries built in the new tree should report the
 	// new tree when they call runtime.GOROOT.
@@ -5045,15 +5058,19 @@ func TestExecBuildX(t *testing.T) {
 		t.Skip("skipping because cgo not enabled")
 	}
 
-	if runtime.GOOS == "plan9" || runtime.GOOS == "windows" {
-		t.Skipf("skipping because unix shell is not supported on %s", runtime.GOOS)
-	}
+	testenv.MustHaveExecPath(t, "/usr/bin/env")
+	testenv.MustHaveExecPath(t, "bash")
 
 	tg := testgo(t)
 	defer tg.cleanup()
 
 	tg.tempDir("cache")
 	tg.setenv("GOCACHE", tg.path("cache"))
+
+	// Before building our test main.go, ensure that an up-to-date copy of
+	// runtime/cgo is present in the cache. If it isn't, the 'go build' step below
+	// will fail with "can't open import". See golang.org/issue/29004.
+	tg.run("build", "runtime/cgo")
 
 	tg.tempFile("main.go", `package main; import "C"; func main() { print("hello") }`)
 	src := tg.path("main.go")
@@ -5097,7 +5114,7 @@ func TestExecBuildX(t *testing.T) {
 	if len(matches) == 0 {
 		t.Fatal("no WORK directory")
 	}
-	tg.must(os.RemoveAll(matches[1]))
+	tg.must(robustio.RemoveAll(matches[1]))
 }
 
 func TestParallelNumber(t *testing.T) {
@@ -5128,9 +5145,10 @@ func TestUpxCompression(t *testing.T) {
 		t.Skipf("skipping upx test on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 
+	testenv.MustHaveExecPath(t, "upx")
 	out, err := exec.Command("upx", "--version").CombinedOutput()
 	if err != nil {
-		t.Skip("skipping because upx is not available")
+		t.Fatalf("upx --version failed: %v", err)
 	}
 
 	// upx --version prints `upx <version>` in the first line of output:
@@ -5139,13 +5157,13 @@ func TestUpxCompression(t *testing.T) {
 	re := regexp.MustCompile(`([[:digit:]]+)\.([[:digit:]]+)`)
 	upxVersion := re.FindStringSubmatch(string(out))
 	if len(upxVersion) != 3 {
-		t.Errorf("bad upx version string: %s", upxVersion)
+		t.Fatalf("bad upx version string: %s", upxVersion)
 	}
 
 	major, err1 := strconv.Atoi(upxVersion[1])
 	minor, err2 := strconv.Atoi(upxVersion[2])
 	if err1 != nil || err2 != nil {
-		t.Errorf("bad upx version string: %s", upxVersion[0])
+		t.Fatalf("bad upx version string: %s", upxVersion[0])
 	}
 
 	// Anything below 3.94 is known not to work with go binaries
@@ -5198,26 +5216,29 @@ func TestQEMUUserMode(t *testing.T) {
 	src, obj := tg.path("main.go"), tg.path("main")
 
 	for _, arch := range testArchs {
-		out, err := exec.Command("qemu-"+arch.qemu, "--version").CombinedOutput()
-		if err != nil {
-			t.Logf("Skipping %s test (qemu-%s not available)", arch.g, arch.qemu)
-			continue
-		}
+		arch := arch
+		t.Run(arch.g, func(t *testing.T) {
+			qemu := "qemu-" + arch.qemu
+			testenv.MustHaveExecPath(t, qemu)
 
-		tg.setenv("GOARCH", arch.g)
-		tg.run("build", "-o", obj, src)
+			out, err := exec.Command(qemu, "--version").CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s --version failed: %v", qemu, err)
+			}
 
-		out, err = exec.Command("qemu-"+arch.qemu, obj).CombinedOutput()
-		if err != nil {
-			t.Logf("qemu-%s output:\n%s\n", arch.qemu, out)
-			t.Errorf("qemu-%s failed with %v", arch.qemu, err)
-			continue
-		}
-		if want := "hello qemu-user"; string(out) != want {
-			t.Errorf("bad output from qemu-%s:\ngot %s; want %s", arch.qemu, out, want)
-		}
+			tg.setenv("GOARCH", arch.g)
+			tg.run("build", "-o", obj, src)
+
+			out, err = exec.Command(qemu, obj).CombinedOutput()
+			if err != nil {
+				t.Logf("%s output:\n%s\n", qemu, out)
+				t.Fatalf("%s failed with %v", qemu, err)
+			}
+			if want := "hello qemu-user"; string(out) != want {
+				t.Errorf("bad output from %s:\ngot %s; want %s", qemu, out, want)
+			}
+		})
 	}
-
 }
 
 func TestCacheListStale(t *testing.T) {
@@ -5269,8 +5290,14 @@ func TestCacheVet(t *testing.T) {
 	if strings.Contains(os.Getenv("GODEBUG"), "gocacheverify") {
 		t.Skip("GODEBUG gocacheverify")
 	}
-	if cfg.Getenv("GOCACHE") == "off" {
-		tooSlow(t)
+	if testing.Short() {
+		// In short mode, reuse cache.
+		// Test failures may be masked if the cache has just the right entries already
+		// (not a concern during all.bash, which runs in a clean cache).
+		if cfg.Getenv("GOCACHE") == "off" {
+			tooSlow(t)
+		}
+	} else {
 		tg.makeTempdir()
 		tg.setenv("GOCACHE", tg.path("cache"))
 	}
@@ -5654,6 +5681,7 @@ func TestTestSkipVetAfterFailedBuild(t *testing.T) {
 }
 
 func TestTestVetRebuild(t *testing.T) {
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -5933,6 +5961,7 @@ func TestBadCgoDirectives(t *testing.T) {
 	if !canCgo {
 		t.Skip("no cgo")
 	}
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 
@@ -6047,6 +6076,7 @@ func TestTwoPkgConfigs(t *testing.T) {
 	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" {
 		t.Skipf("no shell scripts on %s", runtime.GOOS)
 	}
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -6077,6 +6107,8 @@ func TestCgoCache(t *testing.T) {
 	if !canCgo {
 		t.Skip("no cgo")
 	}
+	tooSlow(t)
+
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -6127,6 +6159,7 @@ func TestLinkerTmpDirIsDeleted(t *testing.T) {
 	if !canCgo {
 		t.Skip("skipping because cgo not enabled")
 	}
+	tooSlow(t)
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -6216,6 +6249,7 @@ func TestGoTestWithoutTests(t *testing.T) {
 
 // Issue 25579.
 func TestGoBuildDashODevNull(t *testing.T) {
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -6228,6 +6262,7 @@ func TestGoBuildDashODevNull(t *testing.T) {
 // Issue 25093.
 func TestCoverpkgTestOnly(t *testing.T) {
 	skipIfGccgo(t, "gccgo has no cover tool")
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()

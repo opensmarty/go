@@ -84,15 +84,17 @@ type Action struct {
 	actionID cache.ActionID // cache ID of action input
 	buildID  string         // build ID of action output
 
-	VetxOnly bool       // Mode=="vet": only being called to supply info about dependencies
-	needVet  bool       // Mode=="build": need to fill in vet config
-	vetCfg   *vetConfig // vet config
-	output   []byte     // output redirect buffer (nil means use b.Print)
+	VetxOnly  bool       // Mode=="vet": only being called to supply info about dependencies
+	needVet   bool       // Mode=="build": need to fill in vet config
+	needBuild bool       // Mode=="build": need to do actual build (can be false if needVet is true)
+	vetCfg    *vetConfig // vet config
+	output    []byte     // output redirect buffer (nil means use b.Print)
 
 	// Execution state.
-	pending  int  // number of deps yet to complete
-	priority int  // relative execution priority
-	Failed   bool // whether the action failed
+	pending  int         // number of deps yet to complete
+	priority int         // relative execution priority
+	Failed   bool        // whether the action failed
+	json     *actionJSON // action graph information
 }
 
 // BuildActionID returns the action ID section of a's build ID.
@@ -124,6 +126,9 @@ func (q *actionQueue) Pop() interface{} {
 }
 
 func (q *actionQueue) push(a *Action) {
+	if a.json != nil {
+		a.json.TimeReady = time.Now()
+	}
 	heap.Push(q, a)
 }
 
@@ -135,16 +140,28 @@ type actionJSON struct {
 	ID         int
 	Mode       string
 	Package    string
-	Deps       []int    `json:",omitempty"`
-	IgnoreFail bool     `json:",omitempty"`
-	Args       []string `json:",omitempty"`
-	Link       bool     `json:",omitempty"`
-	Objdir     string   `json:",omitempty"`
-	Target     string   `json:",omitempty"`
-	Priority   int      `json:",omitempty"`
-	Failed     bool     `json:",omitempty"`
-	Built      string   `json:",omitempty"`
-	VetxOnly   bool     `json:",omitempty"`
+	Deps       []int     `json:",omitempty"`
+	IgnoreFail bool      `json:",omitempty"`
+	Args       []string  `json:",omitempty"`
+	Link       bool      `json:",omitempty"`
+	Objdir     string    `json:",omitempty"`
+	Target     string    `json:",omitempty"`
+	Priority   int       `json:",omitempty"`
+	Failed     bool      `json:",omitempty"`
+	Built      string    `json:",omitempty"`
+	VetxOnly   bool      `json:",omitempty"`
+	NeedVet    bool      `json:",omitempty"`
+	NeedBuild  bool      `json:",omitempty"`
+	ActionID   string    `json:",omitempty"`
+	BuildID    string    `json:",omitempty"`
+	TimeReady  time.Time `json:",omitempty"`
+	TimeStart  time.Time `json:",omitempty"`
+	TimeDone   time.Time `json:",omitempty"`
+
+	Cmd     []string      // `json:",omitempty"`
+	CmdReal time.Duration `json:",omitempty"`
+	CmdUser time.Duration `json:",omitempty"`
+	CmdSys  time.Duration `json:",omitempty"`
 }
 
 // cacheKey is the key for the action cache.
@@ -174,26 +191,30 @@ func actionGraphJSON(a *Action) string {
 
 	var list []*actionJSON
 	for id, a := range workq {
-		aj := &actionJSON{
-			Mode:       a.Mode,
-			ID:         id,
-			IgnoreFail: a.IgnoreFail,
-			Args:       a.Args,
-			Objdir:     a.Objdir,
-			Target:     a.Target,
-			Failed:     a.Failed,
-			Priority:   a.priority,
-			Built:      a.built,
-			VetxOnly:   a.VetxOnly,
+		if a.json == nil {
+			a.json = &actionJSON{
+				Mode:       a.Mode,
+				ID:         id,
+				IgnoreFail: a.IgnoreFail,
+				Args:       a.Args,
+				Objdir:     a.Objdir,
+				Target:     a.Target,
+				Failed:     a.Failed,
+				Priority:   a.priority,
+				Built:      a.built,
+				VetxOnly:   a.VetxOnly,
+				NeedBuild:  a.needBuild,
+				NeedVet:    a.needVet,
+			}
+			if a.Package != nil {
+				// TODO(rsc): Make this a unique key for a.Package somehow.
+				a.json.Package = a.Package.ImportPath
+			}
+			for _, a1 := range a.Deps {
+				a.json.Deps = append(a.json.Deps, inWorkq[a1])
+			}
 		}
-		if a.Package != nil {
-			// TODO(rsc): Make this a unique key for a.Package somehow.
-			aj.Package = a.Package.ImportPath
-		}
-		for _, a1 := range a.Deps {
-			aj.Deps = append(aj.Deps, inWorkq[a1])
-		}
-		list = append(list, aj)
+		list = append(list, a.json)
 	}
 
 	js, err := json.MarshalIndent(list, "", "\t")
@@ -212,6 +233,8 @@ const (
 	ModeBuild BuildMode = iota
 	ModeInstall
 	ModeBuggyInstall
+
+	ModeVetOnly = 1 << 8
 )
 
 func (b *Builder) Init() {
@@ -354,6 +377,9 @@ func (b *Builder) AutoAction(mode, depMode BuildMode, p *load.Package) *Action {
 // depMode is the action (build or install) to use when building dependencies.
 // To turn package main into an executable, call b.Link instead.
 func (b *Builder) CompileAction(mode, depMode BuildMode, p *load.Package) *Action {
+	vetOnly := mode&ModeVetOnly != 0
+	mode &^= ModeVetOnly
+
 	if mode != ModeBuild && (p.Internal.Local || p.Module != nil) && p.Target == "" {
 		// Imported via local path or using modules. No permanent target.
 		mode = ModeBuild
@@ -400,6 +426,19 @@ func (b *Builder) CompileAction(mode, depMode BuildMode, p *load.Package) *Actio
 		return a
 	})
 
+	// Find the build action; the cache entry may have been replaced
+	// by the install action during (*Builder).installAction.
+	buildAction := a
+	switch buildAction.Mode {
+	case "build", "built-in package", "gccgo stdlib":
+		// ok
+	case "build-install":
+		buildAction = a.Deps[0]
+	default:
+		panic("lost build action: " + buildAction.Mode)
+	}
+	buildAction.needBuild = buildAction.needBuild || !vetOnly
+
 	// Construct install action.
 	if mode == ModeInstall || mode == ModeBuggyInstall {
 		a = b.installAction(a, mode)
@@ -421,7 +460,7 @@ func (b *Builder) VetAction(mode, depMode BuildMode, p *load.Package) *Action {
 func (b *Builder) vetAction(mode, depMode BuildMode, p *load.Package) *Action {
 	// Construct vet action.
 	a := b.cacheAction("vet", p, func() *Action {
-		a1 := b.CompileAction(mode, depMode, p)
+		a1 := b.CompileAction(mode|ModeVetOnly, depMode, p)
 
 		// vet expects to be able to import "fmt".
 		var stk load.ImportStack

@@ -236,7 +236,7 @@ TEXT runtime·sigprocmask(SB),NOSPLIT,$-4
 	MOVL	$0xf1, 0xf1		// crash
 	RET
 
-TEXT runtime·sigreturn_tramp(SB),NOSPLIT,$0
+TEXT sigreturn_tramp<>(SB),NOSPLIT,$0
 	LEAL	140(SP), AX		// Load address of ucontext
 	MOVL	AX, 4(SP)
 	MOVL	$SYS_setcontext, AX
@@ -252,7 +252,7 @@ TEXT runtime·sigaction(SB),NOSPLIT,$24
 	MOVSL				// arg 1 - sig
 	MOVSL				// arg 2 - act
 	MOVSL				// arg 3 - oact
-	LEAL	runtime·sigreturn_tramp(SB), AX
+	LEAL	sigreturn_tramp<>(SB), AX
 	STOSL				// arg 4 - tramp
 	MOVL	$2, AX
 	STOSL				// arg 5 - vers
@@ -279,7 +279,9 @@ TEXT runtime·sigfwd(SB),NOSPLIT,$12-16
 	MOVL	AX, SP
 	RET
 
+// Called by OS using C ABI.
 TEXT runtime·sigtramp(SB),NOSPLIT,$28
+	NOP	SP	// tell vet SP changed - stop checking offsets
 	// Save callee-saved C registers, since the caller may be a C signal handler.
 	MOVL	BX, bx-4(SP)
 	MOVL	BP, bp-8(SP)
@@ -288,11 +290,11 @@ TEXT runtime·sigtramp(SB),NOSPLIT,$28
 	// We don't save mxcsr or the x87 control word because sigtrampgo doesn't
 	// modify them.
 
-	MOVL	signo+0(FP), BX
+	MOVL	32(SP), BX // signo
 	MOVL	BX, 0(SP)
-	MOVL	info+4(FP), BX
+	MOVL	36(SP), BX // info
 	MOVL	BX, 4(SP)
-	MOVL	context+8(FP), BX
+	MOVL	40(SP), BX // context
 	MOVL	BX, 8(SP)
 	CALL	runtime·sigtrampgo(SB)
 
@@ -324,7 +326,7 @@ TEXT runtime·lwp_tramp(SB),NOSPLIT,$0
 	LEAL	m_tls(BX), BP
 	PUSHAL				// save registers
 	PUSHL	BP
-	CALL	runtime·settls(SB)
+	CALL	lwp_setprivate<>(SB)
 	POPL	AX
 	POPAL
 
@@ -361,12 +363,12 @@ TEXT runtime·sigaltstack(SB),NOSPLIT,$-8
 
 TEXT runtime·setldt(SB),NOSPLIT,$8
 	// Under NetBSD we set the GS base instead of messing with the LDT.
-	MOVL	16(SP), AX		// tls0
+	MOVL	base+4(FP), AX
 	MOVL	AX, 0(SP)
-	CALL	runtime·settls(SB)
+	CALL	lwp_setprivate<>(SB)
 	RET
 
-TEXT runtime·settls(SB),NOSPLIT,$16
+TEXT lwp_setprivate<>(SB),NOSPLIT,$16
 	// adjust for ELF: wants to use -4(GS) for g
 	MOVL	base+0(FP), CX
 	ADDL	$4, CX

@@ -23,7 +23,7 @@ type T struct {
 	True        bool
 	I           int
 	U16         uint16
-	X           string
+	X, S        string
 	FloatZero   float64
 	ComplexZero complex128
 	// Nested structs.
@@ -36,8 +36,11 @@ type T struct {
 	W1, W2 *W
 	// Slices
 	SI      []int
+	SICap   []int
 	SIEmpty []int
 	SB      []bool
+	// Arrays
+	AI [3]int
 	// Maps
 	MSI      map[string]int
 	MSIone   map[string]int // one element, for deterministic output
@@ -122,12 +125,15 @@ var tVal = &T{
 	I:      17,
 	U16:    16,
 	X:      "x",
+	S:      "xyz",
 	U:      &U{"v"},
 	V0:     V{6666},
 	V1:     &V{7777}, // leave V2 as nil
 	W0:     W{888},
 	W1:     &W{999}, // leave W2 as nil
 	SI:     []int{3, 4, 5},
+	SICap:  make([]int, 5, 10),
+	AI:     [3]int{3, 4, 5},
 	SB:     []bool{true, false},
 	MSI:    map[string]int{"one": 1, "two": 2, "three": 3},
 	MSIone: map[string]int{"one": 1},
@@ -413,6 +419,7 @@ var execTests = []execTest{
 	{"if true", "{{if true}}TRUE{{end}}", "TRUE", tVal, true},
 	{"if false", "{{if false}}TRUE{{else}}FALSE{{end}}", "FALSE", tVal, true},
 	{"if nil", "{{if nil}}TRUE{{end}}", "", tVal, false},
+	{"if on typed nil interface value", "{{if .NonEmptyInterfaceTypedNil}}TRUE{{ end }}", "", tVal, true},
 	{"if 1", "{{if 1}}NON-ZERO{{else}}ZERO{{end}}", "NON-ZERO", tVal, true},
 	{"if 0", "{{if 0}}NON-ZERO{{else}}ZERO{{end}}", "ZERO", tVal, true},
 	{"if 1.5", "{{if 1.5}}NON-ZERO{{else}}ZERO{{end}}", "NON-ZERO", tVal, true},
@@ -490,6 +497,31 @@ var execTests = []execTest{
 	{"map MI8S", "{{index .MI8S 3}}", "i83", tVal, true},
 	{"map MUI8S", "{{index .MUI8S 2}}", "u82", tVal, true},
 
+	// Slicing.
+	{"slice[:]", "{{slice .SI}}", "[3 4 5]", tVal, true},
+	{"slice[1:]", "{{slice .SI 1}}", "[4 5]", tVal, true},
+	{"slice[1:2]", "{{slice .SI 1 2}}", "[4]", tVal, true},
+	{"slice[-1:]", "{{slice .SI -1}}", "", tVal, false},
+	{"slice[1:-2]", "{{slice .SI 1 -2}}", "", tVal, false},
+	{"slice[1:2:-1]", "{{slice .SI 1 2 -1}}", "", tVal, false},
+	{"slice[2:1]", "{{slice .SI 2 1}}", "", tVal, false},
+	{"slice[2:2:1]", "{{slice .SI 2 2 1}}", "", tVal, false},
+	{"out of range", "{{slice .SI 4 5}}", "", tVal, false},
+	{"out of range", "{{slice .SI 2 2 5}}", "", tVal, false},
+	{"len(s) < indexes < cap(s)", "{{slice .SICap 6 10}}", "[0 0 0 0]", tVal, true},
+	{"len(s) < indexes < cap(s)", "{{slice .SICap 6 10 10}}", "[0 0 0 0]", tVal, true},
+	{"indexes > cap(s)", "{{slice .SICap 10 11}}", "", tVal, false},
+	{"indexes > cap(s)", "{{slice .SICap 6 10 11}}", "", tVal, false},
+	{"array[:]", "{{slice .AI}}", "[3 4 5]", tVal, true},
+	{"array[1:]", "{{slice .AI 1}}", "[4 5]", tVal, true},
+	{"array[1:2]", "{{slice .AI 1 2}}", "[4]", tVal, true},
+	{"string[:]", "{{slice .S}}", "xyz", tVal, true},
+	{"string[0:1]", "{{slice .S 0 1}}", "x", tVal, true},
+	{"string[1:]", "{{slice .S 1}}", "yz", tVal, true},
+	{"string[1:2]", "{{slice .S 1 2}}", "y", tVal, true},
+	{"out of range", "{{slice .S 1 5}}", "", tVal, false},
+	{"3-index slice of string", "{{slice .S 1 2 2}}", "", tVal, false},
+
 	// Len.
 	{"slice", "{{len .SI}}", "3", tVal, true},
 	{"map", "{{len .MSI }}", "3", tVal, true},
@@ -515,6 +547,7 @@ var execTests = []execTest{
 	{"with $x int", "{{with $x := .I}}{{$x}}{{end}}", "17", tVal, true},
 	{"with $x struct.U.V", "{{with $x := $}}{{$x.U.V}}{{end}}", "v", tVal, true},
 	{"with variable and action", "{{with $x := $}}{{$y := $.U.V}}{{$y}}{{end}}", "v", tVal, true},
+	{"with on typed nil interface value", "{{with .NonEmptyInterfaceTypedNil}}TRUE{{ end }}", "", tVal, true},
 
 	// Range.
 	{"range []int", "{{range .SI}}-{{.}}-{{end}}", "-3--4--5-", tVal, true},
@@ -1415,6 +1448,9 @@ func TestEvalFieldErrors(t *testing.T) {
 }
 
 func TestMaxExecDepth(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in -short mode")
+	}
 	tmpl := Must(New("tmpl").Parse(`{{template "tmpl" .}}`))
 	err := tmpl.Execute(ioutil.Discard, nil)
 	got := "<nil>"

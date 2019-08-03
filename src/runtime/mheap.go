@@ -29,6 +29,8 @@ const minPhysPageSize = 4096
 //
 //go:notinheap
 type mheap struct {
+	// lock must only be acquired on the system stack, otherwise a g
+	// could self-deadlock if its stack grows with the lock held.
 	lock      mutex
 	free      mTreap // free spans
 	sweepgen  uint32 // sweep generation, see comment in mspan
@@ -87,6 +89,25 @@ type mheap struct {
 	// TODO(austin): pagesInUse should be a uintptr, but the 386
 	// compiler can't 8-byte align fields.
 
+	// Scavenger pacing parameters
+	//
+	// The two basis parameters and the scavenge ratio parallel the proportional
+	// sweeping implementation, the primary differences being that:
+	//  * Scavenging concerns itself with RSS, estimated as heapRetained()
+	//  * Rather than pacing the scavenger to the GC, it is paced to a
+	//    time-based rate computed in gcPaceScavenger.
+	//
+	// scavengeRetainedGoal represents our goal RSS.
+	//
+	// All fields must be accessed with lock.
+	//
+	// TODO(mknyszek): Consider abstracting the basis fields and the scavenge ratio
+	// into its own type so that this logic may be shared with proportional sweeping.
+	scavengeTimeBasis     int64
+	scavengeRetainedBasis uint64
+	scavengeBytesPerNS    float64
+	scavengeRetainedGoal  uint64
+
 	// Page reclaimer state
 
 	// reclaimIndex is the page index in allArenas of next page to
@@ -105,14 +126,6 @@ type mheap struct {
 	//
 	// This is accessed atomically.
 	reclaimCredit uintptr
-
-	// scavengeCredit is spare credit for extra bytes scavenged.
-	// Since the scavenging mechanisms operate on spans, it may
-	// scavenge more than requested. Any spare pages released
-	// go to this credit pool.
-	//
-	// This is protected by the mheap lock.
-	scavengeCredit uintptr
 
 	// Malloc stats.
 	largealloc  uint64                  // bytes allocated for large objects
@@ -172,7 +185,7 @@ type mheap struct {
 	// simply blocking GC (by disabling preemption).
 	sweepArenas []arenaIdx
 
-	// _ uint32 // ensure 64-bit alignment of central
+	_ uint32 // ensure 64-bit alignment of central
 
 	// central free lists for small size classes.
 	// the padding makes sure that the mcentrals are
@@ -394,7 +407,6 @@ type mspan struct {
 	divShift2   uint8      // for divide by elemsize - divMagic.shift2
 	scavenged   bool       // whether this span has had its pages released to the OS
 	elemsize    uintptr    // computed from sizeclass or from npages
-	unusedsince int64      // first time spotted by gc in mspanfree state
 	limit       uintptr    // end of data in span
 	speciallock mutex      // guards specials list
 	specials    *special   // linked list of special records sorted by offset.
@@ -502,11 +514,13 @@ func (h *mheap) coalesce(s *mspan) {
 		h.free.insert(other)
 	}
 
-	hpBefore := s.hugePages()
+	hpMiddle := s.hugePages()
 
 	// Coalesce with earlier, later spans.
+	var hpBefore uintptr
 	if before := spanOf(s.base() - 1); before != nil && before.state == mSpanFree {
 		if s.scavenged == before.scavenged {
+			hpBefore = before.hugePages()
 			merge(before, s, before)
 		} else {
 			realign(before, s, before)
@@ -514,23 +528,29 @@ func (h *mheap) coalesce(s *mspan) {
 	}
 
 	// Now check to see if next (greater addresses) span is free and can be coalesced.
+	var hpAfter uintptr
 	if after := spanOf(s.base() + s.npages*pageSize); after != nil && after.state == mSpanFree {
 		if s.scavenged == after.scavenged {
+			hpAfter = after.hugePages()
 			merge(s, after, after)
 		} else {
 			realign(s, after, after)
 		}
 	}
-
-	if !s.scavenged && s.hugePages() > hpBefore {
+	if !s.scavenged && s.hugePages() > hpBefore+hpMiddle+hpAfter {
 		// If s has grown such that it now may contain more huge pages than it
-		// did before, then mark the whole region as huge-page-backable.
+		// and its now-coalesced neighbors did before, then mark the whole region
+		// as huge-page-backable.
 		//
 		// Otherwise, on systems where we break up huge pages (like Linux)
 		// s may not be backed by huge pages because it could be made up of
 		// pieces which are broken up in the underlying VMA. The primary issue
 		// with this is that it can lead to a poor estimate of the amount of
 		// free memory backed by huge pages for determining the scavenging rate.
+		//
+		// TODO(mknyszek): Measure the performance characteristics of sysHugePage
+		// and determine whether it makes sense to only sysHugePage on the pages
+		// that matter, or if it's better to just mark the whole region.
 		sysHugePage(unsafe.Pointer(s.base()), s.npages*pageSize)
 	}
 }
@@ -549,7 +569,7 @@ func (s *mspan) hugePages() uintptr {
 		end &^= physHugePageSize - 1
 	}
 	if start < end {
-		return (end - start) / physHugePageSize
+		return (end - start) >> physHugePageShift
 	}
 	return 0
 }
@@ -1085,9 +1105,8 @@ func (h *mheap) alloc(npage uintptr, spanclass spanClass, large bool, needzero b
 // The memory backing the returned span may not be zeroed if
 // span.needzero is set.
 //
-// allocManual must be called on the system stack to prevent stack
-// growth. Since this is used by the stack allocator, stack growth
-// during allocManual would self-deadlock.
+// allocManual must be called on the system stack because it acquires
+// the heap lock. See mheap for details.
 //
 //go:systemstack
 func (h *mheap) allocManual(npage uintptr, stat *uint64) *mspan {
@@ -1204,15 +1223,14 @@ HaveSpan:
 
 		// Since we allocated out of a scavenged span, we just
 		// grew the RSS. Mitigate this by scavenging enough free
-		// space to make up for it.
+		// space to make up for it but only if we need to.
 		//
-		// Also, scavenge may cause coalescing, so prevent
+		// scavengeLocked may cause coalescing, so prevent
 		// coalescing with s by temporarily changing its state.
 		s.state = mSpanManual
-		h.scavengeLocked(s.npages * pageSize)
+		h.scavengeIfNeededLocked(s.npages * pageSize)
 		s.state = mSpanFree
 	}
-	s.unusedsince = 0
 
 	h.setSpans(s.base(), npage, s)
 
@@ -1237,23 +1255,22 @@ func (h *mheap) grow(npage uintptr) bool {
 		return false
 	}
 
-	// Scavenge some pages out of the free treap to make up for
-	// the virtual memory space we just allocated. We prefer to
-	// scavenge the largest spans first since the cost of scavenging
-	// is proportional to the number of sysUnused() calls rather than
-	// the number of pages released, so we make fewer of those calls
-	// with larger spans.
-	h.scavengeLocked(size)
-
 	// Create a fake "in use" span and free it, so that the
-	// right coalescing happens.
+	// right accounting and coalescing happens.
 	s := (*mspan)(h.spanalloc.alloc())
 	s.init(uintptr(v), size/pageSize)
 	h.setSpans(s.base(), s.npages, s)
-	atomic.Store(&s.sweepgen, h.sweepgen)
-	s.state = mSpanInUse
-	h.pagesInUse += uint64(s.npages)
-	h.freeSpanLocked(s, false, true, 0)
+	s.state = mSpanFree
+	memstats.heap_idle += uint64(size)
+	// (*mheap).sysAlloc returns untouched/uncommitted memory.
+	s.scavenged = true
+	// s is always aligned to the heap arena size which is always > physPageSize,
+	// so its totally safe to just add directly to heap_released. Coalescing,
+	// if possible, will also always be correct in terms of accounting, because
+	// s.base() must be a physical page boundary.
+	memstats.heap_released += uint64(size)
+	h.coalesce(s)
+	h.free.insert(s)
 	return true
 }
 
@@ -1283,7 +1300,7 @@ func (h *mheap) freeSpan(s *mspan, large bool) {
 			// heap_scan changed.
 			gcController.revise()
 		}
-		h.freeSpanLocked(s, true, true, 0)
+		h.freeSpanLocked(s, true, true)
 		unlock(&h.lock)
 	})
 }
@@ -1295,8 +1312,8 @@ func (h *mheap) freeSpan(s *mspan, large bool) {
 // This must only be called when gcphase == _GCoff. See mSpanState for
 // an explanation.
 //
-// freeManual must be called on the system stack to prevent stack
-// growth, just like allocManual.
+// freeManual must be called on the system stack because it acquires
+// the heap lock. See mheap for details.
 //
 //go:systemstack
 func (h *mheap) freeManual(s *mspan, stat *uint64) {
@@ -1304,12 +1321,11 @@ func (h *mheap) freeManual(s *mspan, stat *uint64) {
 	lock(&h.lock)
 	*stat -= uint64(s.npages << _PageShift)
 	memstats.heap_sys += uint64(s.npages << _PageShift)
-	h.freeSpanLocked(s, false, true, 0)
+	h.freeSpanLocked(s, false, true)
 	unlock(&h.lock)
 }
 
-// s must be on the busy list or unlinked.
-func (h *mheap) freeSpanLocked(s *mspan, acctinuse, acctidle bool, unusedsince int64) {
+func (h *mheap) freeSpanLocked(s *mspan, acctinuse, acctidle bool) {
 	switch s.state {
 	case mSpanManual:
 		if s.allocCount != 0 {
@@ -1337,13 +1353,6 @@ func (h *mheap) freeSpanLocked(s *mspan, acctinuse, acctidle bool, unusedsince i
 	}
 	s.state = mSpanFree
 
-	// Stamp newly unused spans. The scavenger will use that
-	// info to potentially give back some pages to the OS.
-	s.unusedsince = unusedsince
-	if unusedsince == 0 {
-		s.unusedsince = nanotime()
-	}
-
 	// Coalesce span with neighbors.
 	h.coalesce(s)
 
@@ -1351,18 +1360,69 @@ func (h *mheap) freeSpanLocked(s *mspan, acctinuse, acctidle bool, unusedsince i
 	h.free.insert(s)
 }
 
+// scavengeSplit takes t.span() and attempts to split off a span containing size
+// (in bytes) worth of physical pages from the back.
+//
+// The split point is only approximately defined by size since the split point
+// is aligned to physPageSize and pageSize every time. If physHugePageSize is
+// non-zero and the split point would break apart a huge page in the span, then
+// the split point is also aligned to physHugePageSize.
+//
+// If the desired split point ends up at the base of s, or if size is obviously
+// much larger than s, then a split is not possible and this method returns nil.
+// Otherwise if a split occurred it returns the newly-created span.
+func (h *mheap) scavengeSplit(t treapIter, size uintptr) *mspan {
+	s := t.span()
+	start, end := s.physPageBounds()
+	if end <= start || end-start <= size {
+		// Size covers the whole span.
+		return nil
+	}
+	// The span is bigger than what we need, so compute the base for the new
+	// span if we decide to split.
+	base := end - size
+	// Round down to the next physical or logical page, whichever is bigger.
+	base &^= (physPageSize - 1) | (pageSize - 1)
+	if base <= start {
+		return nil
+	}
+	if physHugePageSize > pageSize && base&^(physHugePageSize-1) >= start {
+		// We're in danger of breaking apart a huge page, so include the entire
+		// huge page in the bound by rounding down to the huge page size.
+		// base should still be aligned to pageSize.
+		base &^= physHugePageSize - 1
+	}
+	if base == start {
+		// After all that we rounded base down to s.base(), so no need to split.
+		return nil
+	}
+	if base < start {
+		print("runtime: base=", base, ", s.npages=", s.npages, ", s.base()=", s.base(), ", size=", size, "\n")
+		print("runtime: physPageSize=", physPageSize, ", physHugePageSize=", physHugePageSize, "\n")
+		throw("bad span split base")
+	}
+
+	// Split s in-place, removing from the back.
+	n := (*mspan)(h.spanalloc.alloc())
+	nbytes := s.base() + s.npages*pageSize - base
+	h.free.mutate(t, func(s *mspan) {
+		n.init(base, nbytes/pageSize)
+		s.npages -= nbytes / pageSize
+		h.setSpan(n.base()-1, s)
+		h.setSpan(n.base(), n)
+		h.setSpan(n.base()+nbytes-1, n)
+		n.needzero = s.needzero
+		n.state = s.state
+	})
+	return n
+}
+
 // scavengeLocked scavenges nbytes worth of spans in the free treap by
 // starting from the span with the highest base address and working down.
-// It then takes those spans and places them in scav. h must be locked.
-func (h *mheap) scavengeLocked(nbytes uintptr) {
-	// Use up scavenge credit if there's any available.
-	if nbytes > h.scavengeCredit {
-		nbytes -= h.scavengeCredit
-		h.scavengeCredit = 0
-	} else {
-		h.scavengeCredit -= nbytes
-		return
-	}
+// It then takes those spans and places them in scav.
+//
+// Returns the amount of memory scavenged in bytes. h must be locked.
+func (h *mheap) scavengeLocked(nbytes uintptr) uintptr {
 	released := uintptr(0)
 	// Iterate over spans with huge pages first, then spans without.
 	const mask = treapIterScav | treapIterHuge
@@ -1378,7 +1438,11 @@ func (h *mheap) scavengeLocked(nbytes uintptr) {
 				continue
 			}
 			n := t.prev()
-			h.free.erase(t)
+			if span := h.scavengeSplit(t, nbytes-released); span != nil {
+				s = span
+			} else {
+				h.free.erase(t)
+			}
 			released += s.scavenge()
 			// Now that s is scavenged, we must eagerly coalesce it
 			// with its neighbors to prevent having two spans with
@@ -1388,60 +1452,52 @@ func (h *mheap) scavengeLocked(nbytes uintptr) {
 			h.free.insert(s)
 		}
 	}
-	// If we over-scavenged, turn that extra amount into credit.
-	if released > nbytes {
-		h.scavengeCredit += released - nbytes
-	}
-}
-
-// scavengeAll visits each node in the unscav treap and scavenges the
-// treapNode's span. It then removes the scavenged span from
-// unscav and adds it into scav before continuing. h must be locked.
-func (h *mheap) scavengeAllLocked(now, limit uint64) uintptr {
-	// Iterate over the unscavenged spans in the treap scavenging spans
-	// if unused for at least limit time.
-	released := uintptr(0)
-	for t := h.free.start(treapIterScav, 0); t.valid(); {
-		s := t.span()
-		n := t.next()
-		if (now - uint64(s.unusedsince)) > limit {
-			start, end := s.physPageBounds()
-			if start < end {
-				h.free.erase(t)
-				released += s.scavenge()
-				// See (*mheap).scavengeLocked.
-				h.coalesce(s)
-				h.free.insert(s)
-			}
-		}
-		t = n
-	}
 	return released
 }
 
-func (h *mheap) scavengeAll(k int32, now, limit uint64) {
+// scavengeIfNeededLocked calls scavengeLocked if we're currently above the
+// scavenge goal in order to prevent the mutator from out-running the
+// the scavenger.
+//
+// h must be locked.
+func (h *mheap) scavengeIfNeededLocked(size uintptr) {
+	if r := heapRetained(); r+uint64(size) > h.scavengeRetainedGoal {
+		todo := uint64(size)
+		// If we're only going to go a little bit over, just request what
+		// we actually need done.
+		if overage := r + uint64(size) - h.scavengeRetainedGoal; overage < todo {
+			todo = overage
+		}
+		h.scavengeLocked(uintptr(todo))
+	}
+}
+
+// scavengeAll visits each node in the free treap and scavenges the
+// treapNode's span. It then removes the scavenged span from
+// unscav and adds it into scav before continuing.
+func (h *mheap) scavengeAll() {
 	// Disallow malloc or panic while holding the heap lock. We do
 	// this here because this is an non-mallocgc entry-point to
 	// the mheap API.
 	gp := getg()
 	gp.m.mallocing++
 	lock(&h.lock)
-	released := h.scavengeAllLocked(now, limit)
+	released := h.scavengeLocked(^uintptr(0))
 	unlock(&h.lock)
 	gp.m.mallocing--
 
 	if debug.gctrace > 0 {
 		if released > 0 {
-			print("scvg", k, ": ", released>>20, " MB released\n")
+			print("forced scvg: ", released>>20, " MB released\n")
 		}
-		print("scvg", k, ": inuse: ", memstats.heap_inuse>>20, ", idle: ", memstats.heap_idle>>20, ", sys: ", memstats.heap_sys>>20, ", released: ", memstats.heap_released>>20, ", consumed: ", (memstats.heap_sys-memstats.heap_released)>>20, " (MB)\n")
+		print("forced scvg: inuse: ", memstats.heap_inuse>>20, ", idle: ", memstats.heap_idle>>20, ", sys: ", memstats.heap_sys>>20, ", released: ", memstats.heap_released>>20, ", consumed: ", (memstats.heap_sys-memstats.heap_released)>>20, " (MB)\n")
 	}
 }
 
 //go:linkname runtime_debug_freeOSMemory runtime/debug.freeOSMemory
 func runtime_debug_freeOSMemory() {
 	GC()
-	systemstack(func() { mheap_.scavengeAll(-1, ^uint64(0), 0) })
+	systemstack(func() { mheap_.scavengeAll() })
 }
 
 // Initialize a new span with the given start and npages.
@@ -1456,7 +1512,6 @@ func (span *mspan) init(base uintptr, npages uintptr) {
 	span.spanclass = 0
 	span.elemsize = 0
 	span.state = mSpanDead
-	span.unusedsince = 0
 	span.scavenged = false
 	span.speciallock.key = 0
 	span.specials = nil

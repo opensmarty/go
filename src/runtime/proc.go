@@ -295,7 +295,7 @@ func gopark(unlockf func(*g, unsafe.Pointer) bool, lock unsafe.Pointer, reason w
 		throw("gopark: bad g status")
 	}
 	mp.waitlock = lock
-	mp.waitunlockf = *(*unsafe.Pointer)(unsafe.Pointer(&unlockf))
+	mp.waitunlockf = unlockf
 	gp.waitreason = reason
 	mp.waittraceev = traceEv
 	mp.waittraceskip = traceskip
@@ -2595,8 +2595,7 @@ func park_m(gp *g) {
 	casgstatus(gp, _Grunning, _Gwaiting)
 	dropg()
 
-	if _g_.m.waitunlockf != nil {
-		fn := *(*func(*g, unsafe.Pointer) bool)(unsafe.Pointer(&_g_.m.waitunlockf))
+	if fn := _g_.m.waitunlockf; fn != nil {
 		ok := fn(gp, _g_.m.waitlock)
 		_g_.m.waitunlockf = nil
 		_g_.m.waitlock = nil
@@ -2851,7 +2850,11 @@ func reentersyscall(pc, sp uintptr) {
 }
 
 // Standard syscall entry used by the go syscall library and normal cgo calls.
+//
+// This is exported via linkname to assembly in the syscall package.
+//
 //go:nosplit
+//go:linkname entersyscall
 func entersyscall() {
 	reentersyscall(getcallerpc(), getcallersp())
 }
@@ -2941,8 +2944,11 @@ func entersyscallblock_handoff() {
 //
 // Write barriers are not allowed because our P may have been stolen.
 //
+// This is exported via linkname to assembly in the syscall package.
+//
 //go:nosplit
 //go:nowritebarrierrec
+//go:linkname exitsyscall
 func exitsyscall() {
 	_g_ := getg()
 
@@ -3628,9 +3634,6 @@ func _GC()                        { _GC() }
 func _LostSIGPROFDuringAtomic64() { _LostSIGPROFDuringAtomic64() }
 func _VDSO()                      { _VDSO() }
 
-// Counts SIGPROFs received while in atomic64 critical section, on mips{,le}
-var lostAtomic64Count uint64
-
 // Called if we receive a SIGPROF signal.
 // Called by the signal handler, may run during STW.
 //go:nowritebarrierrec
@@ -3648,7 +3651,7 @@ func sigprof(pc, sp, lr uintptr, gp *g, mp *m) {
 	if GOARCH == "mips" || GOARCH == "mipsle" || GOARCH == "arm" {
 		if f := findfunc(pc); f.valid() {
 			if hasPrefix(funcname(f), "runtime/internal/atomic") {
-				lostAtomic64Count++
+				cpuprof.lostAtomic++
 				return
 			}
 		}
@@ -3788,10 +3791,6 @@ func sigprof(pc, sp, lr uintptr, gp *g, mp *m) {
 	}
 
 	if prof.hz != 0 {
-		if (GOARCH == "mips" || GOARCH == "mipsle" || GOARCH == "arm") && lostAtomic64Count > 0 {
-			cpuprof.addLostAtomic64(lostAtomic64Count)
-			lostAtomic64Count = 0
-		}
 		cpuprof.add(gp, stk[:n])
 	}
 	getg().m.mallocing--
@@ -4282,19 +4281,6 @@ func sysmon() {
 	checkdead()
 	unlock(&sched.lock)
 
-	// If a heap span goes unused for 5 minutes after a garbage collection,
-	// we hand it back to the operating system.
-	scavengelimit := int64(5 * 60 * 1e9)
-
-	if debug.scavenge > 0 {
-		// Scavenge-a-lot for testing.
-		forcegcperiod = 10 * 1e6
-		scavengelimit = 20 * 1e6
-	}
-
-	lastscavenge := nanotime()
-	nscavenge := 0
-
 	lasttrace := int64(0)
 	idle := 0 // how many cycles in succession we had not wokeup somebody
 	delay := uint32(0)
@@ -4316,9 +4302,6 @@ func sysmon() {
 				// Make wake-up period small enough
 				// for the sampling to be correct.
 				maxsleep := forcegcperiod / 2
-				if scavengelimit < forcegcperiod {
-					maxsleep = scavengelimit / 2
-				}
 				shouldRelax := true
 				if osRelaxMinNS > 0 {
 					next := timeSleepUntil()
@@ -4380,12 +4363,6 @@ func sysmon() {
 			list.push(forcegc.g)
 			injectglist(&list)
 			unlock(&forcegc.lock)
-		}
-		// scavenge heap once in a while
-		if lastscavenge+scavengelimit/2 < now {
-			mheap_.scavengeAll(int32(nscavenge), uint64(now), uint64(scavengelimit))
-			lastscavenge = now
-			nscavenge++
 		}
 		if debug.schedtrace > 0 && lasttrace+int64(debug.schedtrace)*1000000 <= now {
 			lasttrace = now
@@ -5234,15 +5211,6 @@ func doInit(t *initTask) {
 		throw("recursive call during initialization - linker skew")
 	default: // not initialized yet
 		t.state = 1 // initialization in progress
-		if raceenabled {
-			// Randomize initialization order of packages t depends on.
-			// TODO: enable always instead of just for race?
-			s := *(*[]uintptr)(unsafe.Pointer(&slice{array: add(unsafe.Pointer(t), 3*sys.PtrSize), len: int(t.ndeps), cap: int(t.ndeps)}))
-			for i := len(s) - 1; i > 0; i-- {
-				j := int(fastrandn(uint32(i + 1)))
-				s[i], s[j] = s[j], s[i]
-			}
-		}
 		for i := uintptr(0); i < t.ndeps; i++ {
 			p := add(unsafe.Pointer(t), (3+i)*sys.PtrSize)
 			t2 := *(**initTask)(p)
